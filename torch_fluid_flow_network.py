@@ -104,15 +104,14 @@ if sol.converged:
 else:
     print("Solver failed.")'''
 
-# Counter diffusion flame
-
 gas = ct.Solution('gri30.yaml')
-gas.TP = gas.T, Pc_solution
 
 width = 0.5 # distance between fuel and oxidizer outlets
 loglevel = 1 # 0 suppresses output, 5 produces very detailed output
 
 flame = ct.CounterFlowDiffusionFlame(gas, width=width)
+
+flame.P = Pc_solution / 6894.76
 
 flame.fuel_inlet.mdot = mdot_fuel
 flame.fuel_inlet.X = fuel_type
@@ -125,13 +124,62 @@ flame.oxidizer_inlet.T = temp_oxidizer
 flame.boundary_emissivities = 0.0, 0.0
 flame.radiation_enabled = False
 
+# Set refinement parameters
+flame.set_refine_criteria(ratio=4.0, slope=0.1, curve=0.2, prune=0.05)
+
 flame.solve(loglevel, auto=True)
 
 flame.show() # shoes current solution
 
+# Counterflow diffusion flame
+
 fig, ax = plt.subplots()
-plt.plot(flame.grid, f.T)
+plt.plot(flame.grid, flame.T)
 ax.set_title('Temperature of the flame')
 ax.set(ylim=(0,2500), xlim=(0.000, 0.020))
 # fig.savefig('./diffusion_flame.pdf')
 plt.show()
+
+# Diffusion flame unstable branch
+
+n_max = 1000 # number of steps
+initial_spacing = 0.6
+unstable_spacing = 0.95
+
+temperature_increment = 20.0
+max_increment = 100
+target_delta_T_max = 20
+
+max_error_count = 3
+error_count = 0
+
+strain_rate_tol = 0.1
+
+flame.two_point_control_enabled = True
+flame.flame.set_bounds(spread_rate=(-1e5, 1e20)) # prevents finding solutions with negative inlet velocites
+
+flame.max_time_set_count = 100
+T_max = max(flame.T)
+a_max = strain_rate = flame.strain_rate('max')
+data = []
+
+for i in range(n_max):
+    if strain_rate > 0.98 * a_max:
+        spacing = initial_spacing
+    else:
+        spacing = unstable_spacing
+
+    control_temperature = np.min(flame.T) + spacing * (np.max(flame.T) - np.min(flame.T))
+    backup_state = flame.to_array()
+
+    logger.debug(f'Iteration {i}: Control temperature = {control_temperature:.2f} K')
+    flame.set_left_control_point(control_temperature)
+    flame.set_right_control_point(control_temperature)
+
+    flame.left_control_point_temperature -= temperature_increment
+    flame.right_control_point_temperature -= temperature_increment
+    flame.clear_stats()
+
+    if (f.left_control_point_temperature < flame.fuel_inlet.T + 100) or flame.right_control_point_temperature < flame.oxidizer_inlet.T + 100):
+        logger.info("Control point temperature is sufficiently close to inlet temperature.")
+        break
