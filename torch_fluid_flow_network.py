@@ -3,6 +3,8 @@ import cantera as ct
 import math
 from rocketcea.cea_obj import CEA_Obj
 import scipy.optimize as opt
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 
 #Inputs
@@ -102,7 +104,34 @@ if sol.converged:
 else:
     print("Solver failed.")'''
 
+# Counter diffusion flame
 
+gas = ct.Solution('gri30.yaml')
+gas.TP = gas.T, Pc_solution
 
+width = 0.5 # distance between fuel and oxidizer outlets
+loglevel = 1 # 0 suppresses output, 5 produces very detailed output
 
+flame = ct.CounterFlowDiffusionFlame(gas, width=width)
 
+flame.fuel_inlet.mdot = mdot_fuel
+flame.fuel_inlet.X = fuel_type
+flame.fuel_inlet.T = temp_fuel
+
+flame.oxidizer_inlet.mdot = mdot_oxidizer
+flame.oxidizer_inlet.X = oxidizer_type
+flame.oxidizer_inlet.T = temp_oxidizer
+
+flame.boundary_emissivities = 0.0, 0.0
+flame.radiation_enabled = False
+
+flame.solve(loglevel, auto=True)
+
+flame.show() # shoes current solution
+
+fig, ax = plt.subplots()
+plt.plot(flame.grid, f.T)
+ax.set_title('Temperature of the flame')
+ax.set(ylim=(0,2500), xlim=(0.000, 0.020))
+# fig.savefig('./diffusion_flame.pdf')
+plt.show()
