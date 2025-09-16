@@ -154,5 +154,128 @@ ax.set(ylim=(0,5000), xlim=(0.000, width))
 # fig.savefig('./diffusion_flame.pdf')
 plt.show()
 
-# 
+# Extinction Strain Rate
 
+# Define a limit for the maximum temperature below which the flame is considered as extinguished and the computation is aborted
+temperature_limit_extinction = max(flame.oxidizer_inlet.T, flame.fuel_inlet.T)
+
+# Initialize and solve
+print('Creating the initial solution')
+flame.solve(loglevel=0, auto=True)
+
+# Define output locations
+output_path = Path() / "diffusion_flame_extinction_data"
+output_path.mkdir(parents=True, exist_ok=True)
+
+hdf_output = "native" in ct.hdf_support()
+if hdf_output:
+    file_name = output_path / "flame_data.h5"
+    file_name.unlink(missing_ok=True)
+
+def names(test):
+    if hdf_output:
+        # use internal container structure for HDF
+        file_name = output_path / "flame_data.h5"
+        return file_name, test
+    # use separate files for YAML
+    file_name = output_path / f"{test}.yaml".replace("-", "_").replace("/", "_")
+    return file_name, "solution"
+
+file_name, entry = names("initial-solution")
+flame.save(file_name, name=entry, description="Initial solution", overwrite=True)
+
+exp_d_a = - 1. / 2.
+exp_u_a = 1. / 2.
+exp_V_a = 1.
+exp_lam_a = 2.
+exp_mdot_a = 1. / 2.
+
+alpha = [35000.] # Set initial strain rate
+delta_alpha = 1000. # Initial relative strain rate increase
+delta_alpha_factor = 25. # Factor of refinement of the strain rate increase
+delta_alpha_min = .001 # Limit of the refinement: Minimum normalized strain rate increase
+delta_T_min = 1  # K, limit of the Temperature decrease
+
+n = 0
+n_last_burning = 0
+
+T_max = [np.max(flame.T)]
+a_max = [np.max(np.abs(np.gradient(flame.velocity) / np.gradient(flame.grid)))]
+
+while True:
+    n += 1
+    # Update relative strain rates
+    alpha.append(alpha[n_last_burning] + delta_alpha)
+    strain_factor = alpha[-1] / alpha[n_last_burning]
+    
+    # Create an initial guess based on the previous solution
+    # Update grid
+    # Note that grid scaling changes the diffusion flame width
+    flame.flame.grid *= strain_factor ** exp_d_a
+    normalized_grid = flame.grid / (flame.grid[-1] - flame.grid[0])
+    
+    # Update mass fluxes
+    flame.fuel_inlet.mdot *= strain_factor ** exp_mdot_a
+    flame.oxidizer_inlet.mdot *= strain_factor ** exp_mdot_a
+    
+    # Update velocities
+    flame.set_profile('velocity', normalized_grid, flame.velocity * strain_factor ** exp_u_a)
+    flame.set_profile('spread_rate', normalized_grid, flame.spread_rate * strain_factor ** exp_V_a)
+    
+    # Update pressure curvature
+    flame.set_profile('lambda', normalized_grid, flame.L * strain_factor ** exp_lam_a)
+    
+    try:
+        flame.solve(loglevel=0)
+    except ct.CanteraError as e:
+        print('Error: Did not converge at n =', n, e)
+
+    T_max.append(np.max(flame.T))
+    a_max.append(np.max(np.abs(np.gradient(flame.velocity) / np.gradient(flame.grid))))
+    
+    if not np.isclose(np.max(flame.T), temperature_limit_extinction):
+        n_last_burning = n # Proceed to next strain rate
+        file_name, entry = names(f"extinction/{n:04d}")
+        flame.save(file_name, name=entry, description=f"Solution at alpha = {alpha[-1]}", overwrite=True)
+
+        print('Flame burning at alpha = {:8.4F}. Proceeding to the next iteration, with delta_alpha = {}'.format(alpha[-1], delta_alpha))
+    elif ((T_max[-2] - T_max[-1] < delta_T_min) and (delta_alpha < delta_alpha_min)):
+        # If the temperature difference is too small and the minimum relative strain rate increase is reached, save the last, non-burning, solution to the output file and break the loop
+        file_name, entry = names(f"extinction/{n:04d}")
+        flame.save(file_name, name=entry, overwrite=True, description=f"Flame extinguished at alpha={alpha[-1]}")
+
+        print('Flame extinguished at alpha = {0:8.4F}.'.format(alpha[-1]),
+              'Abortion criterion satisfied.')
+        break
+    else:
+        # Procedure if flame extinguished but abortion criterion is not satisfied
+        # Reduce relative strain rate increase
+        delta_alpha = delta_alpha / delta_alpha_factor
+
+        print('Flame extinguished at alpha = {0:8.4F}. Restoring alpha = {1:8.4F} and '
+              'trying delta_alpha = {2}'.format(
+                  alpha[-1], alpha[n_last_burning], delta_alpha))
+
+        # Restore last burning solution
+        file_name, entry = names(f"extinction/{n_last_burning:04d}")
+        flame.restore(file_name, entry)
+
+# Results
+file_name, entry = names(f"extinction/{n_last_burning:04d}")
+flame.restore(file_name, entry)
+
+print('----------------------------------------------------------------------')
+print('Parameters at the extinction point:')
+print('Pressure p={0} bar'.format(flame.P / 1e5))
+print('Peak temperature T={0:4.0f} K'.format(np.max(flame.T)))
+print('Mean axial strain rate a_mean={0:.2e} 1/s'.format(flame.strain_rate('mean')))
+print('Maximum axial strain rate a_max={0:.2e} 1/s'.format(flame.strain_rate('max')))
+print('Fuel inlet potential flow axial strain rate a_fuel={0:.2e} 1/s'.format(flame.strain_rate('potential_flow_fuel')))
+print('Oxidizer inlet potential flow axial strain rate a_ox={0:.2e} 1/s'.format(flame.strain_rate('potential_flow_oxidizer')))
+print('Axial strain rate at stoichiometric surface a_stoich={0:.2e} 1/s'.format(flame.strain_rate('stoichiometric', fuel='C3H8')))
+
+plt.figure()
+plt.semilogx(a_max, T_max)
+plt.xlabel(r'$a_{max}$ [1/s]')
+plt.ylabel(r'$T_{max}$ [K]')
+plt.show()
