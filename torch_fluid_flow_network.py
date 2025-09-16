@@ -6,6 +6,8 @@ import scipy.optimize as opt
 from pathlib import Path
 import matplotlib.pyplot as plt
 
+from custom_fuels import add_custom_fuels
+#from custom_fuels import add_custom_fuels
 
 #Inputs
 fuel_type = 'C3H8:1'
@@ -20,9 +22,13 @@ temp_oxidizer = 298.15; #K
 
 orifice_dia_fuel = 0.075; #in
 orifice_dia_oxidizer = 0.106; #in
-orifice_dia_outlet = 0.18; #in
+
+orifice_dia_outlet = 0.35; #in
 cd = 0.6 #sharp-edged orifice assumption
 
+#load custom fuels from custom_fuels.py library & initialize CEA
+add_custom_fuels()
+cea = CEA_Obj(oxName = 'GOX', fuelName = 'GC3H8')
 
 #Define fluid properties from Cantera Library
 fuel = ct.Solution('gri30.yaml')
@@ -52,18 +58,7 @@ pressure_ambient = pressure_ambient*6894.76 #Pa
 pressure_guess = 50 #psia
 pressure_chamber = pressure_guess*6894.76 #Pa
 
-print("Chamber Pressure: ", pressure_chamber/6894.76, "psia")
-cea = CEA_Obj(oxName = 'GOX', fuelName = 'C3H8')
-temp_chamber = cea.get_Tcomb(Pc = pressure_chamber/6894.76, MR = 3.64)
-MW, gamma_chamber = cea.get_Chamber_MolWt_gamma(Pc = pressure_chamber/6894.76, MR = 3.64)
-
-s = cea.get_full_cea_output(pressure_chamber/6894.76, MR = 3.64, eps =1)
-print(s)
-
-cea = CEA_Obj(oxName="LOX", fuelName="LH2")
-#print(cea.get_Tcomb(Pc=100, MR=6.0))
-
-'''def mass_balance(pressure_chamber):
+def mass_balance(pressure_chamber):
     #use the critical pressure ratio to decide whether flow is choked or not
     pressure_critical_fuel = pressure_fuel*(2/(gamma_fuel+1))**(gamma_fuel/(gamma_fuel-1))
     pressure_critical_oxidizer = pressure_oxidizer*(2/(gamma_oxidizer+1))**(gamma_oxidizer/(gamma_oxidizer-1))
@@ -80,11 +75,14 @@ cea = CEA_Obj(oxName="LOX", fuelName="LH2")
    
     MR = mdot_oxidizer/mdot_fuel
 
-    #bring in NASA CEA to get thermophysical properties of the combustion products
-    cea = CEA_Obj(oxName = 'GOX', fuelName = 'Propane')
-    Isp, cstar, temp_chamber, MW, gamma_chamber = cea.get_IvacCstrTc_ChmMwGam(pressure_chamber/6894.76, MR)
-    rho_chamber = pressure_chamber*MW/(8314.5*temp_chamber) #kg/m^3
-    print(mdot_fuel, mdot_oxidizer, MR, temp_chamber)
+    #get CEA values
+    temp_chamber = cea.get_Tcomb(pressure_chamber/6894.76, MR)
+    temp_chamber =temp_chamber*0.555556 #convert from Rankine to Kelvin
+    rho_chamber = cea.get_Chamber_Density(pressure_chamber/6894.76, MR)
+    rho_chamber = rho_chamber*16.018463 #convert from lbm/ft^3 to kg/m^3
+    MW, gamma_chamber = cea.get_Chamber_MolWt_gamma(pressure_chamber/6894.76, MR)
+    MW = MW*0.45359237 #convert from lbm/lbmol to kg/kmol
+
     pressure_critical_outlet = pressure_chamber*(2/(gamma_chamber+1))**(gamma_chamber/(gamma_chamber-1))
 
     if pressure_ambient < pressure_critical_outlet:
@@ -98,88 +96,60 @@ cea = CEA_Obj(oxName="LOX", fuelName="LH2")
 
 sol = opt.root_scalar(mass_balance, bracket=[pressure_ambient+1, min(pressure_fuel, pressure_oxidizer)-1], method='bisect')
 
+#Get the mdots of the converged solution
+def get_mdot(Pc):
+        # same logic as inside mass_balance, but returns mdot_fuel, mdot_oxidizer
+        pressure_critical_fuel =  pressure_fuel*(2/(gamma_fuel+1))**(gamma_fuel/(gamma_fuel-1))
+        pressure_critical_oxidizer = pressure_oxidizer*(2/(gamma_oxidizer+1))**(gamma_oxidizer/(gamma_oxidizer-1))
+
+        if Pc <= pressure_critical_fuel:
+            mdot_fuel = cd*orifice_area_fuel*math.sqrt(gamma_fuel*rho_fuel*pressure_fuel*(2/(gamma_fuel+1))**((gamma_fuel+1)/(gamma_fuel-1)))
+        else:
+            mdot_fuel = cd*orifice_area_fuel*math.sqrt(2*rho_fuel*pressure_fuel*(gamma_fuel/(gamma_fuel-1))*((Pc/pressure_fuel)**(2/gamma_fuel)-(Pc/pressure_fuel)**((gamma_fuel+1)/gamma_fuel)))
+        if Pc <= pressure_critical_oxidizer:
+            mdot_oxidizer = cd*orifice_area_oxidizer*math.sqrt(gamma_oxidizer*rho_oxidizer*pressure_oxidizer*(2/(gamma_oxidizer+1))**((gamma_oxidizer+1)/(gamma_oxidizer-1)))
+        else:
+            mdot_oxidizer = cd*orifice_area_oxidizer*math.sqrt(2*rho_oxidizer*pressure_oxidizer*(gamma_oxidizer/(gamma_oxidizer-1))*((Pc/pressure_oxidizer)**(2/gamma_oxidizer)-(Pc/pressure_oxidizer)**((gamma_oxidizer+1)/gamma_oxidizer)))
+        return mdot_fuel, mdot_oxidizer
+
 if sol.converged:
     Pc_solution = sol.root
-    print(f"Chamber Pressure: {Pc_solution/6894.76:.2f} psia")
+    print(f"Chamber Pressure: {Pc_solution/6894.76:.3f} psia")
+    actual_mdot_fuel, actual_mdot_oxidizer = get_mdot(Pc_solution)
+    print(f"Fuel Mass Flow Rate: {actual_mdot_fuel} kg/s")
+    print(f"Oxidizer Mass Flow Rate: {actual_mdot_oxidizer:.6f} kg/s")
+    print(f"Mixture Ratio: {actual_mdot_oxidizer/actual_mdot_fuel:.5f}")
 else:
-    print("Solver failed.")'''
+    print("Solver failed.")
 
+# Counter diffusion flame
 gas = ct.Solution('gri30.yaml')
+gas.TP = gas.T, Pc_solution
 
-width = 0.5 # distance between fuel and oxidizer outlets
+width = 0.75 # distance between fuel and oxidizer outlets, in 
+width = width*0.0254 #convert to meters
 loglevel = 1 # 0 suppresses output, 5 produces very detailed output
 
-flame = ct.CounterFlowDiffusionFlame(gas, width=width)
+flame = ct.CounterflowDiffusionFlame(gas, width=width)
 
-flame.P = Pc_solution / 6894.76
-
-flame.fuel_inlet.mdot = mdot_fuel
+flame.fuel_inlet.mdot = actual_mdot_fuel
 flame.fuel_inlet.X = fuel_type
 flame.fuel_inlet.T = temp_fuel
 
-flame.oxidizer_inlet.mdot = mdot_oxidizer
+flame.oxidizer_inlet.mdot = actual_mdot_oxidizer
 flame.oxidizer_inlet.X = oxidizer_type
 flame.oxidizer_inlet.T = temp_oxidizer
 
 flame.boundary_emissivities = 0.0, 0.0
 flame.radiation_enabled = False
 
-# Set refinement parameters
-flame.set_refine_criteria(ratio=4.0, slope=0.1, curve=0.2, prune=0.05)
-
 flame.solve(loglevel, auto=True)
 
 flame.show() # shoes current solution
 
-# Counterflow diffusion flame
-
 fig, ax = plt.subplots()
 plt.plot(flame.grid, flame.T)
 ax.set_title('Temperature of the flame')
-ax.set(ylim=(0,2500), xlim=(0.000, 0.020))
+ax.set(ylim=(0,2500), xlim=(0.000, width))
 # fig.savefig('./diffusion_flame.pdf')
 plt.show()
-
-# Diffusion flame unstable branch
-
-n_max = 1000 # number of steps
-initial_spacing = 0.6
-unstable_spacing = 0.95
-
-temperature_increment = 20.0
-max_increment = 100
-target_delta_T_max = 20
-
-max_error_count = 3
-error_count = 0
-
-strain_rate_tol = 0.1
-
-flame.two_point_control_enabled = True
-flame.flame.set_bounds(spread_rate=(-1e5, 1e20)) # prevents finding solutions with negative inlet velocites
-
-flame.max_time_set_count = 100
-T_max = max(flame.T)
-a_max = strain_rate = flame.strain_rate('max')
-data = []
-
-for i in range(n_max):
-    if strain_rate > 0.98 * a_max:
-        spacing = initial_spacing
-    else:
-        spacing = unstable_spacing
-
-    control_temperature = np.min(flame.T) + spacing * (np.max(flame.T) - np.min(flame.T))
-    backup_state = flame.to_array()
-
-    logger.debug(f'Iteration {i}: Control temperature = {control_temperature:.2f} K')
-    flame.set_left_control_point(control_temperature)
-    flame.set_right_control_point(control_temperature)
-
-    flame.left_control_point_temperature -= temperature_increment
-    flame.right_control_point_temperature -= temperature_increment
-    flame.clear_stats()
-
-    if (f.left_control_point_temperature < flame.fuel_inlet.T + 100) or flame.right_control_point_temperature < flame.oxidizer_inlet.T + 100):
-        logger.info("Control point temperature is sufficiently close to inlet temperature.")
-        break
