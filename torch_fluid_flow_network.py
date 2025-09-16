@@ -145,11 +145,14 @@ flame.radiation_enabled = False
 
 flame.solve(loglevel, auto=True)
 
-flame.show() # shoes current solution
+flame.show() # shows current solution
 
 fig, ax = plt.subplots()
 plt.plot(flame.grid, flame.T)
 ax.set_title('Temperature of the flame')
-ax.set(ylim=(0,2500), xlim=(0.000, width))
+ax.set(ylim=(0,5000), xlim=(0.000, width))
 # fig.savefig('./diffusion_flame.pdf')
 plt.show()
+
+# 
+
